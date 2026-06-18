@@ -1,5 +1,5 @@
 // ============================================================
-// СЕРВЕРНАЯ ЧАСТЬ — С ДРУЗЬЯМИ И УДАЛЕНИЕМ ПОСТОВ
+// СЕРВЕРНАЯ ЧАСТЬ — СЕССИИ, КОММЕНТАРИИ, ОПТИМИЗАЦИЯ
 // ============================================================
 
 const express = require('express');
@@ -16,27 +16,33 @@ const io = socketIo(server, {
     cors: {
         origin: "*",
         methods: ["GET", "POST"]
-    }
+    },
+    pingTimeout: 60000,
+    pingInterval: 25000
 });
 
 const PORT = process.env.PORT || 3000;
 
+// Middleware
 app.use(cors());
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 app.use(express.static('public'));
 
 // ============================================================
-// БАЗА ДАННЫХ SQLITE
+// БАЗА ДАННЫХ
 // ============================================================
 
 const db = new sqlite3.Database('./database.sqlite', (err) => {
-    if (err) console.error('Ошибка БД:', err);
+    if (err) console.error('❌ Ошибка БД:', err);
     else console.log('✅ База данных подключена');
 });
 
+// Включаем поддержку FOREIGN KEY
+db.run('PRAGMA foreign_keys = ON');
+
 db.serialize(() => {
-    // Пользователи
+    // Таблица пользователей
     db.run(`
         CREATE TABLE IF NOT EXISTS users (
             id TEXT PRIMARY KEY,
@@ -47,11 +53,12 @@ db.serialize(() => {
             bio TEXT,
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
             last_seen DATETIME DEFAULT CURRENT_TIMESTAMP,
-            is_online BOOLEAN DEFAULT 0
+            is_online BOOLEAN DEFAULT 0,
+            session_token TEXT
         )
     `);
 
-    // Посты
+    // Таблица постов
     db.run(`
         CREATE TABLE IF NOT EXISTS posts (
             id TEXT PRIMARY KEY,
@@ -64,7 +71,20 @@ db.serialize(() => {
         )
     `);
 
-    // Лайки
+    // Таблица комментариев
+    db.run(`
+        CREATE TABLE IF NOT EXISTS comments (
+            id TEXT PRIMARY KEY,
+            post_id TEXT NOT NULL,
+            user_id TEXT NOT NULL,
+            content TEXT NOT NULL,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (post_id) REFERENCES posts(id) ON DELETE CASCADE,
+            FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+        )
+    `);
+
+    // Таблица лайков
     db.run(`
         CREATE TABLE IF NOT EXISTS likes (
             id TEXT PRIMARY KEY,
@@ -77,13 +97,13 @@ db.serialize(() => {
         )
     `);
 
-    // Друзья
+    // Таблица друзей
     db.run(`
         CREATE TABLE IF NOT EXISTS friends (
             id TEXT PRIMARY KEY,
             user_id TEXT NOT NULL,
             friend_id TEXT NOT NULL,
-            status TEXT DEFAULT 'pending', -- pending, accepted, rejected
+            status TEXT DEFAULT 'pending',
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
             updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
@@ -92,7 +112,7 @@ db.serialize(() => {
         )
     `);
 
-    // Сообщения
+    // Таблица сообщений
     db.run(`
         CREATE TABLE IF NOT EXISTS messages (
             id TEXT PRIMARY KEY,
@@ -106,23 +126,43 @@ db.serialize(() => {
         )
     `);
 
-    console.log('✅ Все таблицы созданы/проверены');
+    console.log('✅ Все таблицы созданы');
 });
 
 // ============================================================
 // ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
 // ============================================================
 
+// Получить пользователя по ID
 function getUserById(id) {
     return new Promise((resolve, reject) => {
-        db.get('SELECT id, username, email, avatar, bio, created_at, last_seen, is_online FROM users WHERE id = ?', [id], (err, row) => {
-            if (err) reject(err);
-            else resolve(row);
-        });
+        db.get(
+            'SELECT id, username, email, avatar, bio, created_at, last_seen, is_online FROM users WHERE id = ?',
+            [id],
+            (err, row) => {
+                if (err) reject(err);
+                else resolve(row);
+            }
+        );
     });
 }
 
-function getPosts(userId = null, limit = 50, offset = 0) {
+// Получить пользователя по токену сессии
+function getUserByToken(token) {
+    return new Promise((resolve, reject) => {
+        db.get(
+            'SELECT id, username, email, avatar, bio FROM users WHERE session_token = ?',
+            [token],
+            (err, row) => {
+                if (err) reject(err);
+                else resolve(row);
+            }
+        );
+    });
+}
+
+// Получить посты с комментариями
+function getPostsWithComments(userId = null, limit = 30, offset = 0) {
     return new Promise((resolve, reject) => {
         let query = `
             SELECT 
@@ -130,15 +170,18 @@ function getPosts(userId = null, limit = 50, offset = 0) {
                 u.username,
                 u.avatar,
                 COUNT(DISTINCT l.id) as likes_count,
-                EXISTS(SELECT 1 FROM likes WHERE post_id = p.id AND user_id = ?) as is_liked
+                COUNT(DISTINCT c.id) as comments_count,
+                EXISTS(SELECT 1 FROM likes WHERE post_id = p.id AND user_id = ?) as is_liked,
+                EXISTS(SELECT 1 FROM likes WHERE post_id = p.id AND user_id = ?) as user_liked
             FROM posts p
             JOIN users u ON p.user_id = u.id
             LEFT JOIN likes l ON p.id = l.post_id
+            LEFT JOIN comments c ON p.id = c.post_id
         `;
-        const params = [userId || null];
+        
+        const params = [userId || null, userId || null];
         
         if (userId) {
-            // Показываем посты только друзей и свои
             query += `
                 WHERE p.user_id = ? OR p.user_id IN (
                     SELECT friend_id FROM friends 
@@ -159,48 +202,32 @@ function getPosts(userId = null, limit = 50, offset = 0) {
         params.push(limit, offset);
         
         db.all(query, params, (err, rows) => {
-            if (err) reject(err);
-            else resolve(rows);
+            if (err) {
+                reject(err);
+            } else {
+                resolve(rows);
+            }
         });
     });
 }
 
-function getFriends(userId) {
+// Получить комментарии к посту
+function getComments(postId) {
     return new Promise((resolve, reject) => {
-        db.all(`
-            SELECT 
-                u.id, u.username, u.email, u.avatar, u.is_online, u.last_seen,
-                f.status,
-                CASE 
-                    WHEN f.user_id = ? THEN f.friend_id
-                    ELSE f.user_id
-                END as friend_id
-            FROM friends f
-            JOIN users u ON (u.id = f.friend_id OR u.id = f.user_id)
-            WHERE (f.user_id = ? OR f.friend_id = ?)
-            AND f.status = 'accepted'
-            AND u.id != ?
-        `, [userId, userId, userId, userId], (err, rows) => {
-            if (err) reject(err);
-            else resolve(rows);
-        });
-    });
-}
-
-function getFriendRequests(userId) {
-    return new Promise((resolve, reject) => {
-        db.all(`
-            SELECT 
-                u.id, u.username, u.email, u.avatar, u.is_online,
-                f.id as request_id,
-                f.created_at
-            FROM friends f
-            JOIN users u ON u.id = f.user_id
-            WHERE f.friend_id = ? AND f.status = 'pending'
-        `, [userId], (err, rows) => {
-            if (err) reject(err);
-            else resolve(rows);
-        });
+        db.all(
+            `
+            SELECT c.*, u.username, u.avatar
+            FROM comments c
+            JOIN users u ON c.user_id = u.id
+            WHERE c.post_id = ?
+            ORDER BY c.created_at ASC
+            `,
+            [postId],
+            (err, rows) => {
+                if (err) reject(err);
+                else resolve(rows);
+            }
+        );
     });
 }
 
@@ -208,8 +235,7 @@ function getFriendRequests(userId) {
 // API РОУТЫ
 // ============================================================
 
-// --- АУТЕНТИФИКАЦИЯ ---
-
+// --- РЕГИСТРАЦИЯ ---
 app.post('/api/register', async (req, res) => {
     const { username, email, password } = req.body;
     
@@ -220,21 +246,22 @@ app.post('/api/register', async (req, res) => {
     try {
         const hashedPassword = await bcrypt.hash(password, 10);
         const id = uuidv4();
+        const sessionToken = uuidv4();
         
         db.run(
-            'INSERT INTO users (id, username, email, password) VALUES (?, ?, ?, ?)',
-            [id, username, email, hashedPassword],
+            'INSERT INTO users (id, username, email, password, session_token) VALUES (?, ?, ?, ?, ?)',
+            [id, username, email, hashedPassword, sessionToken],
             function(err) {
                 if (err) {
                     if (err.message.includes('UNIQUE')) {
-                        return res.status(400).json({ error: 'Пользователь с таким email или именем уже существует' });
+                        return res.status(400).json({ error: 'Пользователь уже существует' });
                     }
                     return res.status(500).json({ error: 'Ошибка сервера' });
                 }
                 res.status(201).json({ 
                     success: true, 
                     user: { id, username, email },
-                    message: 'Регистрация успешна!'
+                    token: sessionToken
                 });
             }
         );
@@ -243,6 +270,7 @@ app.post('/api/register', async (req, res) => {
     }
 });
 
+// --- ЛОГИН ---
 app.post('/api/login', (req, res) => {
     const { email, password } = req.body;
     
@@ -260,7 +288,12 @@ app.post('/api/login', (req, res) => {
             return res.status(401).json({ error: 'Неверный email или пароль' });
         }
 
-        db.run('UPDATE users SET is_online = 1, last_seen = CURRENT_TIMESTAMP WHERE id = ?', [user.id]);
+        // Генерируем новый токен сессии
+        const sessionToken = uuidv4();
+        db.run(
+            'UPDATE users SET session_token = ?, is_online = 1, last_seen = CURRENT_TIMESTAMP WHERE id = ?',
+            [sessionToken, user.id]
+        );
 
         res.json({
             success: true,
@@ -270,13 +303,42 @@ app.post('/api/login', (req, res) => {
                 email: user.email,
                 avatar: user.avatar || '👤',
                 bio: user.bio
-            }
+            },
+            token: sessionToken
         });
     });
 });
 
-// --- ПОЛЬЗОВАТЕЛИ ---
+// --- ПРОВЕРКА СЕССИИ ---
+app.post('/api/verify', (req, res) => {
+    const { token } = req.body;
+    
+    if (!token) {
+        return res.status(401).json({ error: 'Нет токена' });
+    }
 
+    getUserByToken(token).then(user => {
+        if (!user) {
+            return res.status(401).json({ error: 'Неверный токен' });
+        }
+        res.json({ success: true, user });
+    }).catch(err => {
+        res.status(500).json({ error: 'Ошибка сервера' });
+    });
+});
+
+// --- ВЫХОД ---
+app.post('/api/logout', (req, res) => {
+    const { userId } = req.body;
+    
+    if (userId) {
+        db.run('UPDATE users SET session_token = NULL, is_online = 0 WHERE id = ?', [userId]);
+    }
+    
+    res.json({ success: true });
+});
+
+// --- ПОЛУЧИТЬ ВСЕХ ПОЛЬЗОВАТЕЛЕЙ ---
 app.get('/api/users', (req, res) => {
     const search = req.query.search || '';
     const currentUserId = req.query.userId;
@@ -330,32 +392,29 @@ app.get('/api/users', (req, res) => {
     });
 });
 
-app.get('/api/users/:id', async (req, res) => {
+// --- ПОЛУЧИТЬ ПОСТЫ ---
+app.get('/api/posts', async (req, res) => {
     try {
-        const user = await getUserById(req.params.id);
-        if (!user) {
-            return res.status(404).json({ error: 'Пользователь не найден' });
+        const userId = req.query.userId || null;
+        const limit = parseInt(req.query.limit) || 30;
+        const offset = parseInt(req.query.offset) || 0;
+        
+        const posts = await getPostsWithComments(userId, limit, offset);
+        
+        // Для каждого поста получаем комментарии
+        for (let post of posts) {
+            const comments = await getComments(post.id);
+            post.comments = comments;
         }
-        res.json(user);
+        
+        res.json(posts);
     } catch (err) {
+        console.error('Ошибка загрузки постов:', err);
         res.status(500).json({ error: 'Ошибка сервера' });
     }
 });
 
-// --- ПОСТЫ ---
-
-app.get('/api/posts', (req, res) => {
-    const userId = req.query.userId || null;
-    const limit = parseInt(req.query.limit) || 50;
-    const offset = parseInt(req.query.offset) || 0;
-    
-    getPosts(userId, limit, offset).then(posts => {
-        res.json(posts);
-    }).catch(err => {
-        res.status(500).json({ error: 'Ошибка сервера' });
-    });
-});
-
+// --- СОЗДАТЬ ПОСТ ---
 app.post('/api/posts', (req, res) => {
     const { userId, content, image } = req.body;
     
@@ -371,15 +430,40 @@ app.post('/api/posts', (req, res) => {
             if (err) {
                 res.status(500).json({ error: 'Ошибка сервера' });
             } else {
-                res.status(201).json({ 
-                    success: true, 
-                    post: { id, user_id: userId, content, image, created_at: new Date().toISOString() }
-                });
+                // Получаем созданный пост с данными пользователя
+                db.get(
+                    `
+                    SELECT p.*, u.username, u.avatar
+                    FROM posts p
+                    JOIN users u ON p.user_id = u.id
+                    WHERE p.id = ?
+                    `,
+                    [id],
+                    (err, post) => {
+                        if (err) {
+                            res.status(500).json({ error: 'Ошибка сервера' });
+                        } else {
+                            post.comments = [];
+                            post.likes_count = 0;
+                            post.comments_count = 0;
+                            post.is_liked = false;
+                            
+                            // Отправляем новый пост через WebSocket всем
+                            io.emit('new_post', post);
+                            
+                            res.status(201).json({ 
+                                success: true, 
+                                post
+                            });
+                        }
+                    }
+                );
             }
         }
     );
 });
 
+// --- УДАЛИТЬ ПОСТ ---
 app.delete('/api/posts/:id', (req, res) => {
     const postId = req.params.id;
     const userId = req.query.userId;
@@ -388,28 +472,66 @@ app.delete('/api/posts/:id', (req, res) => {
         return res.status(400).json({ error: 'userId обязателен' });
     }
     
-    // Проверяем, что пост принадлежит пользователю
     db.get('SELECT user_id FROM posts WHERE id = ?', [postId], (err, post) => {
         if (err || !post) {
             return res.status(404).json({ error: 'Пост не найден' });
         }
         
         if (post.user_id !== userId) {
-            return res.status(403).json({ error: 'Нет прав на удаление этого поста' });
+            return res.status(403).json({ error: 'Нет прав на удаление' });
         }
         
         db.run('DELETE FROM posts WHERE id = ?', [postId], function(err) {
             if (err) {
                 res.status(500).json({ error: 'Ошибка сервера' });
             } else {
-                res.json({ success: true, message: 'Пост удалён' });
+                io.emit('post_deleted', postId);
+                res.json({ success: true });
             }
         });
     });
 });
 
-// --- ЛАЙКИ ---
+// --- ДОБАВИТЬ КОММЕНТАРИЙ ---
+app.post('/api/comments', (req, res) => {
+    const { postId, userId, content } = req.body;
+    
+    if (!postId || !userId || !content) {
+        return res.status(400).json({ error: 'Все поля обязательны' });
+    }
 
+    const id = uuidv4();
+    db.run(
+        'INSERT INTO comments (id, post_id, user_id, content) VALUES (?, ?, ?, ?)',
+        [id, postId, userId, content],
+        function(err) {
+            if (err) {
+                res.status(500).json({ error: 'Ошибка сервера' });
+            } else {
+                // Получаем созданный комментарий с данными пользователя
+                db.get(
+                    `
+                    SELECT c.*, u.username, u.avatar
+                    FROM comments c
+                    JOIN users u ON c.user_id = u.id
+                    WHERE c.id = ?
+                    `,
+                    [id],
+                    (err, comment) => {
+                        if (err) {
+                            res.status(500).json({ error: 'Ошибка сервера' });
+                        } else {
+                            io.emit('new_comment', { postId, comment });
+                            res.status(201).json({ success: true, comment });
+                        }
+                    }
+                );
+            }
+        }
+    );
+});
+
+// --- ЛАЙКНУТЬ ПОСТ ---
 app.post('/api/like', (req, res) => {
     const { postId, userId } = req.body;
     
@@ -426,13 +548,16 @@ app.post('/api/like', (req, res) => {
                 res.status(500).json({ error: 'Ошибка сервера' });
             } else {
                 db.get('SELECT COUNT(*) as count FROM likes WHERE post_id = ?', [postId], (err, row) => {
-                    res.json({ success: true, likes: row ? row.count : 0 });
+                    const likes = row ? row.count : 0;
+                    io.emit('post_liked', { postId, likes });
+                    res.json({ success: true, likes });
                 });
             }
         }
     );
 });
 
+// --- УБРАТЬ ЛАЙК ---
 app.delete('/api/like', (req, res) => {
     const { postId, userId } = req.body;
     
@@ -444,7 +569,9 @@ app.delete('/api/like', (req, res) => {
                 res.status(500).json({ error: 'Ошибка сервера' });
             } else {
                 db.get('SELECT COUNT(*) as count FROM likes WHERE post_id = ?', [postId], (err, row) => {
-                    res.json({ success: true, likes: row ? row.count : 0 });
+                    const likes = row ? row.count : 0;
+                    io.emit('post_liked', { postId, likes });
+                    res.json({ success: true, likes });
                 });
             }
         }
@@ -452,16 +579,11 @@ app.delete('/api/like', (req, res) => {
 });
 
 // --- ДРУЗЬЯ ---
-
 app.post('/api/friends/request', (req, res) => {
     const { userId, friendId } = req.body;
     
-    if (!userId || !friendId) {
-        return res.status(400).json({ error: 'userId и friendId обязательны' });
-    }
-    
-    if (userId === friendId) {
-        return res.status(400).json({ error: 'Нельзя добавить себя в друзья' });
+    if (!userId || !friendId || userId === friendId) {
+        return res.status(400).json({ error: 'Некорректные данные' });
     }
     
     const id = uuidv4();
@@ -472,15 +594,11 @@ app.post('/api/friends/request', (req, res) => {
             if (err) {
                 res.status(500).json({ error: 'Ошибка сервера' });
             } else {
-                // Уведомляем через сокет
                 const recipientSocketId = onlineUsers.get(friendId);
                 if (recipientSocketId) {
-                    io.to(recipientSocketId).emit('friend_request', {
-                        fromUserId: userId,
-                        requestId: id
-                    });
+                    io.to(recipientSocketId).emit('friend_request', { fromUserId: userId });
                 }
-                res.json({ success: true, message: 'Заявка отправлена' });
+                res.json({ success: true });
             }
         }
     );
@@ -489,10 +607,6 @@ app.post('/api/friends/request', (req, res) => {
 app.post('/api/friends/accept', (req, res) => {
     const { userId, friendId } = req.body;
     
-    if (!userId || !friendId) {
-        return res.status(400).json({ error: 'userId и friendId обязательны' });
-    }
-    
     db.run(
         'UPDATE friends SET status = "accepted", updated_at = CURRENT_TIMESTAMP WHERE user_id = ? AND friend_id = ?',
         [friendId, userId],
@@ -500,14 +614,11 @@ app.post('/api/friends/accept', (req, res) => {
             if (err) {
                 res.status(500).json({ error: 'Ошибка сервера' });
             } else {
-                // Уведомляем через сокет
                 const recipientSocketId = onlineUsers.get(friendId);
                 if (recipientSocketId) {
-                    io.to(recipientSocketId).emit('friend_accepted', {
-                        userId: userId
-                    });
+                    io.to(recipientSocketId).emit('friend_accepted', { userId });
                 }
-                res.json({ success: true, message: 'Заявка принята' });
+                res.json({ success: true });
             }
         }
     );
@@ -516,10 +627,6 @@ app.post('/api/friends/accept', (req, res) => {
 app.post('/api/friends/reject', (req, res) => {
     const { userId, friendId } = req.body;
     
-    if (!userId || !friendId) {
-        return res.status(400).json({ error: 'userId и friendId обязательны' });
-    }
-    
     db.run(
         'DELETE FROM friends WHERE user_id = ? AND friend_id = ?',
         [friendId, userId],
@@ -527,7 +634,7 @@ app.post('/api/friends/reject', (req, res) => {
             if (err) {
                 res.status(500).json({ error: 'Ошибка сервера' });
             } else {
-                res.json({ success: true, message: 'Заявка отклонена' });
+                res.json({ success: true });
             }
         }
     );
@@ -536,32 +643,51 @@ app.post('/api/friends/reject', (req, res) => {
 app.get('/api/friends/:userId', (req, res) => {
     const userId = req.params.userId;
     
-    getFriends(userId).then(friends => {
-        res.json(friends);
-    }).catch(err => {
-        res.status(500).json({ error: 'Ошибка сервера' });
+    db.all(`
+        SELECT 
+            u.id, u.username, u.email, u.avatar, u.is_online, u.last_seen
+        FROM friends f
+        JOIN users u ON (u.id = f.friend_id OR u.id = f.user_id)
+        WHERE (f.user_id = ? OR f.friend_id = ?)
+        AND f.status = 'accepted'
+        AND u.id != ?
+    `, [userId, userId, userId], (err, rows) => {
+        if (err) {
+            res.status(500).json({ error: 'Ошибка сервера' });
+        } else {
+            res.json(rows);
+        }
     });
 });
 
 app.get('/api/friends/requests/:userId', (req, res) => {
     const userId = req.params.userId;
     
-    getFriendRequests(userId).then(requests => {
-        res.json(requests);
-    }).catch(err => {
-        res.status(500).json({ error: 'Ошибка сервера' });
+    db.all(`
+        SELECT 
+            u.id, u.username, u.email, u.avatar,
+            f.id as request_id,
+            f.created_at
+        FROM friends f
+        JOIN users u ON u.id = f.user_id
+        WHERE f.friend_id = ? AND f.status = 'pending'
+    `, [userId], (err, rows) => {
+        if (err) {
+            res.status(500).json({ error: 'Ошибка сервера' });
+        } else {
+            res.json(rows);
+        }
     });
 });
 
 // --- СООБЩЕНИЯ ---
-
 app.get('/api/messages/:userId1/:userId2', (req, res) => {
     const { userId1, userId2 } = req.params;
     
     db.all(
         `SELECT * FROM messages 
          WHERE (from_user = ? AND to_user = ?) OR (from_user = ? AND to_user = ?)
-         ORDER BY created_at ASC LIMIT 100`,
+         ORDER BY created_at ASC LIMIT 200`,
         [userId1, userId2, userId2, userId1],
         (err, rows) => {
             if (err) {
@@ -583,11 +709,14 @@ io.on('connection', (socket) => {
     console.log('🔌 Новое подключение:', socket.id);
 
     socket.on('auth', async (userId) => {
+        if (!userId) return;
+        
         socket.userId = userId;
         onlineUsers.set(userId, socket.id);
         
         db.run('UPDATE users SET is_online = 1, last_seen = CURRENT_TIMESTAMP WHERE id = ?', [userId]);
         
+        // Обновляем список онлайн для всех
         broadcastOnlineUsers();
         
         // Отправляем непрочитанные сообщения
@@ -607,7 +736,7 @@ io.on('connection', (socket) => {
         );
     });
 
-    socket.on('send_message', async (data) => {
+    socket.on('send_message', (data) => {
         const { toUserId, content } = data;
         const fromUserId = socket.userId;
         
@@ -655,7 +784,7 @@ function broadcastOnlineUsers() {
 }
 
 // ============================================================
-// ЗАПУСК СЕРВЕРА
+// ЗАПУСК
 // ============================================================
 
 server.listen(PORT, () => {
@@ -663,10 +792,9 @@ server.listen(PORT, () => {
     🚀 СЕРВЕР ЗАПУЩЕН!
     📡 Порт: ${PORT}
     🌐 URL: http://localhost:${PORT}
-    📊 БД: SQLite (database.sqlite)
     `);
 });
 
 process.on('uncaughtException', (err) => {
-    console.error('❌ Необработанная ошибка:', err);
+    console.error('❌ Ошибка:', err);
 });

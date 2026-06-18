@@ -1,36 +1,60 @@
-const { useState, useEffect, useCallback } = React;
+// ============================================================
+// ПОЛНОСТЬЮ ПЕРЕПИСАННЫЙ ФРОНТЕНД
+// ============================================================
+
+const { useState, useEffect, useCallback, useRef, useMemo } = React;
+
+// --- УТИЛИТЫ ---
+const API = {
+    async request(endpoint, options = {}) {
+        const res = await fetch(endpoint, {
+            ...options,
+            headers: {
+                'Content-Type': 'application/json',
+                ...(options.headers || {})
+            }
+        });
+        const data = await res.json();
+        if (!res.ok) {
+            throw new Error(data.error || 'Ошибка запроса');
+        }
+        return data;
+    }
+};
 
 // --- КОМПОНЕНТ АВТОРИЗАЦИИ ---
 const Auth = ({ onLogin }) => {
     const [isLogin, setIsLogin] = useState(true);
     const [form, setForm] = useState({ username: '', email: '', password: '' });
     const [error, setError] = useState('');
+    const [loading, setLoading] = useState(false);
 
     const handleSubmit = async (e) => {
         e.preventDefault();
         setError('');
-
-        const endpoint = isLogin ? '/api/login' : '/api/register';
-        const payload = isLogin 
-            ? { email: form.email, password: form.password }
-            : { username: form.username, email: form.email, password: form.password };
+        setLoading(true);
 
         try {
-            const res = await fetch(endpoint, {
+            const endpoint = isLogin ? '/api/login' : '/api/register';
+            const payload = isLogin 
+                ? { email: form.email, password: form.password }
+                : { username: form.username, email: form.email, password: form.password };
+
+            const data = await API.request(endpoint, {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(payload)
             });
-            const data = await res.json();
-            if (!res.ok) {
-                setError(data.error || 'Ошибка');
-                return;
-            }
+
             if (data.success) {
-                onLogin(data.user);
+                // Сохраняем токен в localStorage
+                localStorage.setItem('session_token', data.token);
+                localStorage.setItem('user_data', JSON.stringify(data.user));
+                onLogin(data.user, data.token);
             }
         } catch (err) {
-            setError('Ошибка сети');
+            setError(err.message);
+        } finally {
+            setLoading(false);
         }
     };
 
@@ -42,48 +66,58 @@ const Auth = ({ onLogin }) => {
                 placeholder: 'Имя пользователя',
                 value: form.username,
                 onChange: (e) => setForm({ ...form, username: e.target.value }),
-                required: true
+                required: true,
+                disabled: loading
             }),
             React.createElement('input', {
                 type: 'email',
                 placeholder: 'Email',
                 value: form.email,
                 onChange: (e) => setForm({ ...form, email: e.target.value }),
-                required: true
+                required: true,
+                disabled: loading
             }),
             React.createElement('input', {
                 type: 'password',
-                placeholder: 'Пароль',
+                placeholder: 'Пароль (мин. 6 символов)',
                 value: form.password,
                 onChange: (e) => setForm({ ...form, password: e.target.value }),
                 required: true,
-                minLength: 6
+                minLength: 6,
+                disabled: loading
             }),
             error && React.createElement('div', { className: 'error-message' }, error),
-            React.createElement('button', { type: 'submit' }, isLogin ? 'Войти' : 'Зарегистрироваться')
+            React.createElement('button', { 
+                type: 'submit', 
+                disabled: loading 
+            }, loading ? 'Загрузка...' : (isLogin ? 'Войти' : 'Зарегистрироваться'))
         ),
-        React.createElement('div', { className: 'switch', onClick: () => setIsLogin(!isLogin) },
+        React.createElement('div', { 
+            className: 'switch', 
+            onClick: () => { setIsLogin(!isLogin); setError(''); }
+        },
             isLogin ? 'Нет аккаунта? Зарегистрируйся' : 'Уже есть аккаунт? Войди'
         )
     );
 };
 
 // --- КОМПОНЕНТ ПОСТА ---
-const Post = ({ post, currentUserId, onLike, onDelete }) => {
+const Post = ({ post, currentUserId, onLike, onDelete, onComment }) => {
     const [liked, setLiked] = useState(post.is_liked === 1);
     const [likesCount, setLikesCount] = useState(post.likes_count || 0);
+    const [showComments, setShowComments] = useState(false);
+    const [commentText, setCommentText] = useState('');
+    const [comments, setComments] = useState(post.comments || []);
     const isOwner = post.user_id === currentUserId;
 
     const handleLike = async () => {
         const method = liked ? 'DELETE' : 'POST';
         
         try {
-            const res = await fetch('/api/like', {
+            const data = await API.request('/api/like', {
                 method,
-                headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ postId: post.id, userId: currentUserId })
             });
-            const data = await res.json();
             if (data.success) {
                 setLiked(!liked);
                 setLikesCount(data.likes);
@@ -98,23 +132,76 @@ const Post = ({ post, currentUserId, onLike, onDelete }) => {
         if (!confirm('Удалить этот пост?')) return;
         
         try {
-            const res = await fetch(`/api/posts/${post.id}?userId=${currentUserId}`, {
+            await API.request(`/api/posts/${post.id}?userId=${currentUserId}`, {
                 method: 'DELETE'
             });
-            const data = await res.json();
-            if (data.success) {
-                if (onDelete) onDelete(post.id);
-            }
+            if (onDelete) onDelete(post.id);
         } catch (err) {
             console.error('Ошибка удаления:', err);
         }
     };
 
+    const handleAddComment = async () => {
+        if (!commentText.trim()) return;
+
+        try {
+            const data = await API.request('/api/comments', {
+                method: 'POST',
+                body: JSON.stringify({
+                    postId: post.id,
+                    userId: currentUserId,
+                    content: commentText.trim()
+                })
+            });
+            if (data.success) {
+                setComments([...comments, data.comment]);
+                setCommentText('');
+                if (onComment) onComment();
+            }
+        } catch (err) {
+            console.error('Ошибка добавления комментария:', err);
+        }
+    };
+
+    // Подписываемся на новые комментарии через WebSocket
+    useEffect(() => {
+        if (!window.socket) return;
+
+        const handleNewComment = ({ postId, comment }) => {
+            if (postId === post.id) {
+                setComments(prev => [...prev, comment]);
+            }
+        };
+
+        window.socket.on('new_comment', handleNewComment);
+        return () => {
+            window.socket.off('new_comment', handleNewComment);
+        };
+    }, [post.id]);
+
+    // Подписываемся на обновление лайков
+    useEffect(() => {
+        if (!window.socket) return;
+
+        const handleLikeUpdate = ({ postId, likes }) => {
+            if (postId === post.id) {
+                setLikesCount(likes);
+            }
+        };
+
+        window.socket.on('post_liked', handleLikeUpdate);
+        return () => {
+            window.socket.off('post_liked', handleLikeUpdate);
+        };
+    }, [post.id]);
+
     return React.createElement('div', { className: 'post' },
         React.createElement('div', { className: 'post-header' },
             React.createElement('div', { className: 'post-avatar' }, post.avatar || '👤'),
             React.createElement('div', { className: 'post-author' }, post.username),
-            React.createElement('div', { className: 'post-time' }, new Date(post.created_at).toLocaleString()),
+            React.createElement('div', { className: 'post-time' }, 
+                new Date(post.created_at).toLocaleString('ru-RU')
+            ),
             isOwner && React.createElement('button', { 
                 className: 'delete-post-btn',
                 onClick: handleDelete,
@@ -123,10 +210,43 @@ const Post = ({ post, currentUserId, onLike, onDelete }) => {
         ),
         React.createElement('div', { className: 'post-content' }, post.content),
         React.createElement('div', { className: 'post-actions' },
-            React.createElement('button', { onClick: handleLike },
+            React.createElement('button', { 
+                className: `like-btn ${liked ? 'liked' : ''}`,
+                onClick: handleLike 
+            },
                 liked ? '❤️' : '🤍', ' ', likesCount
             ),
-            React.createElement('button', null, '💬 ', post.comments_count || 0)
+            React.createElement('button', { 
+                onClick: () => setShowComments(!showComments) 
+            },
+                '💬 ', (post.comments_count || 0) + (comments.length - (post.comments?.length || 0))
+            )
+        ),
+        showComments && React.createElement('div', { className: 'comments-section' },
+            comments.map((comment, i) => 
+                React.createElement('div', { key: i, className: 'comment' },
+                    React.createElement('span', { className: 'comment-avatar' }, comment.avatar || '👤'),
+                    React.createElement('div', { className: 'comment-content' },
+                        React.createElement('div', { className: 'comment-author' }, comment.username),
+                        React.createElement('div', { className: 'comment-text' }, comment.content),
+                        React.createElement('div', { className: 'comment-time' }, 
+                            new Date(comment.created_at).toLocaleString('ru-RU')
+                        )
+                    )
+                )
+            ),
+            React.createElement('div', { className: 'comment-input' },
+                React.createElement('input', {
+                    type: 'text',
+                    placeholder: 'Написать комментарий...',
+                    value: commentText,
+                    onChange: (e) => setCommentText(e.target.value),
+                    onKeyDown: (e) => {
+                        if (e.key === 'Enter') handleAddComment();
+                    }
+                }),
+                React.createElement('button', { onClick: handleAddComment }, '➤')
+            )
         )
     );
 };
@@ -134,73 +254,126 @@ const Post = ({ post, currentUserId, onLike, onDelete }) => {
 // --- ОСНОВНОЙ КОМПОНЕНТ ---
 const App = () => {
     const [user, setUser] = useState(null);
+    const [token, setToken] = useState(null);
     const [posts, setPosts] = useState([]);
     const [users, setUsers] = useState([]);
     const [onlineUsers, setOnlineUsers] = useState([]);
     const [messages, setMessages] = useState([]);
     const [selectedChat, setSelectedChat] = useState(null);
     const [newPostContent, setNewPostContent] = useState('');
-    const [socket, setSocket] = useState(null);
     const [friendRequests, setFriendRequests] = useState([]);
     const [friends, setFriends] = useState([]);
     const [searchQuery, setSearchQuery] = useState('');
-    const [showSearch, setShowSearch] = useState(false);
-    const [activeTab, setActiveTab] = useState('feed'); // feed, friends, search
+    const [activeTab, setActiveTab] = useState('feed');
+    const [loading, setLoading] = useState(false);
+    const [error, setError] = useState('');
+    const socketRef = useRef(null);
+    const chatInputRef = useRef(null);
+
+    // --- ВОССТАНОВЛЕНИЕ СЕССИИ ---
+    useEffect(() => {
+        const savedToken = localStorage.getItem('session_token');
+        const savedUser = localStorage.getItem('user_data');
+        
+        if (savedToken && savedUser) {
+            const userData = JSON.parse(savedUser);
+            setUser(userData);
+            setToken(savedToken);
+            verifySession(savedToken, userData.id);
+        }
+    }, []);
+
+    const verifySession = async (token, userId) => {
+        try {
+            const data = await API.request('/api/verify', {
+                method: 'POST',
+                body: JSON.stringify({ token })
+            });
+            if (data.success) {
+                setUser(data.user);
+                setToken(token);
+                initSocket(data.user.id);
+            } else {
+                localStorage.removeItem('session_token');
+                localStorage.removeItem('user_data');
+                setUser(null);
+                setToken(null);
+            }
+        } catch (err) {
+            localStorage.removeItem('session_token');
+            localStorage.removeItem('user_data');
+            setUser(null);
+            setToken(null);
+        }
+    };
 
     // --- WEBSOCKET ---
-    useEffect(() => {
-        if (!user) return;
+    const initSocket = useCallback((userId) => {
+        if (socketRef.current) {
+            socketRef.current.disconnect();
+        }
 
-        const newSocket = io();
-        setSocket(newSocket);
+        const socket = io();
+        socketRef.current = socket;
+        window.socket = socket;
 
-        newSocket.on('connect', () => {
-            console.log('Socket подключён');
-            newSocket.emit('auth', user.id);
+        socket.on('connect', () => {
+            console.log('🔌 Socket подключён');
+            socket.emit('auth', userId);
         });
 
-        newSocket.on('online_users', (users) => {
+        socket.on('online_users', (users) => {
             setOnlineUsers(users);
         });
 
-        newSocket.on('new_message', (message) => {
+        socket.on('new_message', (message) => {
             if (selectedChat && (message.from_user === selectedChat || message.to_user === selectedChat)) {
                 setMessages(prev => [...prev, message]);
             }
         });
 
-        newSocket.on('friend_request', (data) => {
-            loadFriendRequests();
-            alert(`📨 Новая заявка в друзья!`);
+        socket.on('new_post', (post) => {
+            setPosts(prev => [post, ...prev]);
         });
 
-        newSocket.on('friend_accepted', (data) => {
+        socket.on('post_deleted', (postId) => {
+            setPosts(prev => prev.filter(p => p.id !== postId));
+        });
+
+        socket.on('friend_request', (data) => {
+            loadFriendRequests();
+            alert('📨 Новая заявка в друзья!');
+        });
+
+        socket.on('friend_accepted', (data) => {
             loadFriends();
             loadFriendRequests();
-            alert(`🎉 Пользователь принял вашу заявку!`);
+            alert('🎉 Пользователь принял вашу заявку!');
         });
 
         return () => {
-            newSocket.close();
+            socket.disconnect();
         };
-    }, [user]);
+    }, [selectedChat]);
 
     // --- ЗАГРУЗКА ДАННЫХ ---
     const loadPosts = useCallback(async () => {
+        if (!user) return;
+        setLoading(true);
         try {
-            const res = await fetch(`/api/posts?userId=${user?.id}`);
-            const data = await res.json();
+            const data = await API.request(`/api/posts?userId=${user.id}`);
             setPosts(data);
         } catch (err) {
-            console.error('Ошибка загрузки постов:', err);
+            setError('Ошибка загрузки постов');
+        } finally {
+            setLoading(false);
         }
     }, [user]);
 
     const loadUsers = useCallback(async (search = '') => {
         try {
             const url = `/api/users${search ? `?search=${encodeURIComponent(search)}` : ''}${user ? `&userId=${user.id}` : ''}`;
-            const res = await fetch(url);
-            const data = await res.json();
+            const data = await API.request(url);
             setUsers(data);
         } catch (err) {
             console.error('Ошибка загрузки пользователей:', err);
@@ -210,8 +383,7 @@ const App = () => {
     const loadFriends = useCallback(async () => {
         if (!user) return;
         try {
-            const res = await fetch(`/api/friends/${user.id}`);
-            const data = await res.json();
+            const data = await API.request(`/api/friends/${user.id}`);
             setFriends(data);
         } catch (err) {
             console.error('Ошибка загрузки друзей:', err);
@@ -221,8 +393,7 @@ const App = () => {
     const loadFriendRequests = useCallback(async () => {
         if (!user) return;
         try {
-            const res = await fetch(`/api/friends/requests/${user.id}`);
-            const data = await res.json();
+            const data = await API.request(`/api/friends/requests/${user.id}`);
             setFriendRequests(data);
         } catch (err) {
             console.error('Ошибка загрузки заявок:', err);
@@ -231,123 +402,124 @@ const App = () => {
 
     const loadMessages = useCallback(async (userId) => {
         try {
-            const res = await fetch(`/api/messages/${user.id}/${userId}`);
-            const data = await res.json();
+            const data = await API.request(`/api/messages/${user.id}/${userId}`);
             setMessages(data);
         } catch (err) {
             console.error('Ошибка загрузки сообщений:', err);
         }
     }, [user]);
 
-    // --- ДЕЙСТВИЯ С ДРУЗЬЯМИ ---
-    const sendFriendRequest = async (friendId) => {
-        try {
-            const res = await fetch('/api/friends/request', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ userId: user.id, friendId })
-            });
-            const data = await res.json();
-            if (data.success) {
-                alert('✅ Заявка отправлена!');
-                loadUsers(searchQuery);
-            }
-        } catch (err) {
-            console.error('Ошибка:', err);
-        }
+    // --- ДЕЙСТВИЯ ---
+    const handleLogin = (userData, token) => {
+        setUser(userData);
+        setToken(token);
+        localStorage.setItem('session_token', token);
+        localStorage.setItem('user_data', JSON.stringify(userData));
+        initSocket(userData.id);
     };
 
-    const acceptFriendRequest = async (friendId) => {
+    const handleLogout = async () => {
         try {
-            const res = await fetch('/api/friends/accept', {
+            await API.request('/api/logout', {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ userId: user.id, friendId })
+                body: JSON.stringify({ userId: user.id })
             });
-            const data = await res.json();
-            if (data.success) {
-                loadFriendRequests();
-                loadFriends();
-                loadUsers(searchQuery);
-            }
         } catch (err) {
-            console.error('Ошибка:', err);
+            console.error('Ошибка выхода:', err);
         }
+        
+        localStorage.removeItem('session_token');
+        localStorage.removeItem('user_data');
+        if (socketRef.current) {
+            socketRef.current.disconnect();
+        }
+        setUser(null);
+        setToken(null);
+        setPosts([]);
+        setUsers([]);
+        setMessages([]);
     };
 
-    const rejectFriendRequest = async (friendId) => {
-        try {
-            const res = await fetch('/api/friends/reject', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ userId: user.id, friendId })
-            });
-            const data = await res.json();
-            if (data.success) {
-                loadFriendRequests();
-            }
-        } catch (err) {
-            console.error('Ошибка:', err);
-        }
-    };
-
-    // --- ДЕЙСТВИЯ С ПОСТАМИ ---
     const createPost = useCallback(async () => {
         if (!newPostContent.trim() || !user) return;
 
         try {
-            const res = await fetch('/api/posts', {
+            const data = await API.request('/api/posts', {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
                     userId: user.id,
                     content: newPostContent.trim()
                 })
             });
-            const data = await res.json();
             if (data.success) {
                 setNewPostContent('');
-                loadPosts();
+                // Пост добавится через WebSocket
             }
         } catch (err) {
-            console.error('Ошибка создания поста:', err);
+            setError('Ошибка создания поста');
         }
-    }, [newPostContent, user, loadPosts]);
+    }, [newPostContent, user]);
 
-    const deletePost = useCallback((postId) => {
-        setPosts(prev => prev.filter(p => p.id !== postId));
-    }, []);
-
-    // --- ОБРАБОТКА ПОИСКА ---
-    useEffect(() => {
-        const delay = setTimeout(() => {
-            if (showSearch || searchQuery) {
-                loadUsers(searchQuery);
-            }
-        }, 300);
-        return () => clearTimeout(delay);
-    }, [searchQuery, loadUsers, showSearch]);
-
-    // --- ОТПРАВКА СООБЩЕНИЙ ---
     const sendMessage = useCallback(async (content) => {
-        if (!selectedChat || !content.trim()) return;
+        if (!selectedChat || !content.trim() || !socketRef.current) return;
 
-        const message = {
+        const messageData = {
             toUserId: selectedChat,
             content: content.trim()
         };
 
-        if (socket) {
-            socket.emit('send_message', message);
-            setMessages(prev => [...prev, { 
-                from_user: user.id,
-                to_user: selectedChat,
-                content: content.trim(),
-                created_at: new Date().toISOString(),
-                is_read: 0
-            }]);
+        socketRef.current.emit('send_message', messageData);
+        setMessages(prev => [...prev, { 
+            from_user: user.id,
+            to_user: selectedChat,
+            content: content.trim(),
+            created_at: new Date().toISOString(),
+            is_read: 0
+        }]);
+    }, [selectedChat, user]);
+
+    const sendFriendRequest = useCallback(async (friendId) => {
+        try {
+            await API.request('/api/friends/request', {
+                method: 'POST',
+                body: JSON.stringify({ userId: user.id, friendId })
+            });
+            alert('✅ Заявка отправлена!');
+            loadUsers(searchQuery);
+        } catch (err) {
+            console.error('Ошибка:', err);
         }
-    }, [selectedChat, socket, user]);
+    }, [user, searchQuery, loadUsers]);
+
+    const acceptFriendRequest = useCallback(async (friendId) => {
+        try {
+            await API.request('/api/friends/accept', {
+                method: 'POST',
+                body: JSON.stringify({ userId: user.id, friendId })
+            });
+            loadFriendRequests();
+            loadFriends();
+            loadUsers(searchQuery);
+        } catch (err) {
+            console.error('Ошибка:', err);
+        }
+    }, [user, searchQuery, loadFriendRequests, loadFriends, loadUsers]);
+
+    const rejectFriendRequest = useCallback(async (friendId) => {
+        try {
+            await API.request('/api/friends/reject', {
+                method: 'POST',
+                body: JSON.stringify({ userId: user.id, friendId })
+            });
+            loadFriendRequests();
+        } catch (err) {
+            console.error('Ошибка:', err);
+        }
+    }, [user, loadFriendRequests]);
+
+    const deletePost = useCallback((postId) => {
+        setPosts(prev => prev.filter(p => p.id !== postId));
+    }, []);
 
     // --- ИНИЦИАЛИЗАЦИЯ ---
     useEffect(() => {
@@ -359,9 +531,19 @@ const App = () => {
         }
     }, [user, loadPosts, loadUsers, loadFriends, loadFriendRequests]);
 
+    // --- ПОИСК ---
+    useEffect(() => {
+        const delay = setTimeout(() => {
+            if (activeTab === 'search') {
+                loadUsers(searchQuery);
+            }
+        }, 300);
+        return () => clearTimeout(delay);
+    }, [searchQuery, loadUsers, activeTab]);
+
     // --- РЕНДЕР ---
     if (!user) {
-        return React.createElement(Auth, { onLogin: setUser });
+        return React.createElement(Auth, { onLogin: handleLogin });
     }
 
     const selectedUser = users.find(u => u.id === selectedChat);
@@ -378,54 +560,65 @@ const App = () => {
                 React.createElement('div', { className: 'sidebar-nav' },
                     React.createElement('button', { 
                         className: activeTab === 'feed' ? 'active' : '',
-                        onClick: () => { setActiveTab('feed'); setShowSearch(false); }
+                        onClick: () => { setActiveTab('feed'); }
                     }, '📰 Лента'),
                     React.createElement('button', { 
                         className: activeTab === 'friends' ? 'active' : '',
-                        onClick: () => { setActiveTab('friends'); setShowSearch(false); }
-                    }, '👥 Друзья', friendRequests.length > 0 && React.createElement('span', { className: 'badge' }, friendRequests.length)),
+                        onClick: () => { setActiveTab('friends'); }
+                    }, '👥 Друзья', 
+                        friendRequests.length > 0 && React.createElement('span', { className: 'badge' }, friendRequests.length)
+                    ),
                     React.createElement('button', { 
                         className: activeTab === 'search' ? 'active' : '',
-                        onClick: () => { setActiveTab('search'); setShowSearch(true); loadUsers(''); }
+                        onClick: () => { setActiveTab('search'); loadUsers(''); }
                     }, '🔍 Поиск'),
-                    React.createElement('button', { onClick: () => { setUser(null); socket?.close(); } }, '🚪 Выйти')
+                    React.createElement('button', { onClick: handleLogout }, '🚪 Выйти')
                 )
             ),
 
-            // --- ОСНОВНАЯ ОБЛАСТЬ ---
+            // --- ОСНОВНОЙ КОНТЕНТ ---
             React.createElement('div', { className: 'main-content' },
-                // Вкладка Лента
+                // Лента
                 activeTab === 'feed' && React.createElement('div', { className: 'feed' },
                     React.createElement('div', { className: 'create-post' },
                         React.createElement('textarea', {
                             placeholder: 'Что у тебя нового?',
                             value: newPostContent,
                             onChange: (e) => setNewPostContent(e.target.value),
-                            rows: 3
+                            rows: 3,
+                            disabled: loading
                         }),
-                        React.createElement('button', { onClick: createPost }, '📝 Опубликовать')
+                        React.createElement('button', { 
+                            onClick: createPost,
+                            disabled: loading || !newPostContent.trim()
+                        }, '📝 Опубликовать')
                     ),
-                    posts.length === 0 
-                        ? React.createElement('div', { className: 'empty-state' }, 'Нет постов. Добавь друзей, чтобы видеть их посты!')
+                    error && React.createElement('div', { className: 'error-message' }, error),
+                    loading && React.createElement('div', { className: 'loading' }, 'Загрузка...'),
+                    posts.length === 0 && !loading 
+                        ? React.createElement('div', { className: 'empty-state' }, 
+                            'Нет постов. Добавь друзей, чтобы видеть их посты!'
+                        )
                         : posts.map(post => 
                             React.createElement(Post, {
                                 key: post.id,
                                 post: post,
                                 currentUserId: user.id,
                                 onLike: loadPosts,
-                                onDelete: deletePost
+                                onDelete: deletePost,
+                                onComment: loadPosts
                             })
                         )
                 ),
 
-                // Вкладка Друзья
+                // Друзья
                 activeTab === 'friends' && React.createElement('div', { className: 'friends-tab' },
                     React.createElement('h2', null, '👥 Друзья'),
                     friendRequests.length > 0 && React.createElement('div', { className: 'friend-requests' },
                         React.createElement('h3', null, '📨 Заявки в друзья'),
                         friendRequests.map(req => 
                             React.createElement('div', { key: req.id, className: 'friend-request' },
-                                React.createElement('span', null, req.avatar, ' ', req.username),
+                                React.createElement('span', null, req.avatar || '👤', ' ', req.username),
                                 React.createElement('div', null,
                                     React.createElement('button', { 
                                         className: 'accept-btn',
@@ -443,8 +636,10 @@ const App = () => {
                         ? React.createElement('div', { className: 'empty-state' }, 'У вас пока нет друзей')
                         : friends.map(friend => 
                             React.createElement('div', { key: friend.id, className: 'friend-item' },
-                                React.createElement('span', null, friend.avatar, ' ', friend.username),
-                                React.createElement('span', { className: onlineUsers.includes(friend.id) ? 'online-dot' : 'offline-dot' },
+                                React.createElement('span', null, friend.avatar || '👤', ' ', friend.username),
+                                React.createElement('span', { 
+                                    className: onlineUsers.includes(friend.id) ? 'online-dot' : 'offline-dot' 
+                                },
                                     onlineUsers.includes(friend.id) ? '🟢 Онлайн' : '⚪ Офлайн'
                                 ),
                                 React.createElement('button', { 
@@ -459,7 +654,7 @@ const App = () => {
                         )
                 ),
 
-                // Вкладка Поиск
+                // Поиск
                 activeTab === 'search' && React.createElement('div', { className: 'search-tab' },
                     React.createElement('h2', null, '🔍 Поиск пользователей'),
                     React.createElement('input', {
@@ -472,7 +667,6 @@ const App = () => {
                     users.filter(u => u.id !== user.id).map(u => {
                         const isFriend = u.friend_status === 'accepted';
                         const isPending = u.friend_status === 'pending';
-                        const isRequestFromMe = u.friend_status === 'pending' && u.id === selectedChat;
                         
                         return React.createElement('div', { key: u.id, className: 'search-result' },
                             React.createElement('div', { className: 'search-user' },
@@ -481,7 +675,9 @@ const App = () => {
                                     React.createElement('div', { className: 'search-username' }, u.username),
                                     React.createElement('div', { className: 'search-email' }, u.email)
                                 ),
-                                React.createElement('span', { className: onlineUsers.includes(u.id) ? 'online-dot' : 'offline-dot' },
+                                React.createElement('span', { 
+                                    className: onlineUsers.includes(u.id) ? 'online-dot' : 'offline-dot' 
+                                },
                                     onlineUsers.includes(u.id) ? '🟢 Онлайн' : '⚪ Офлайн'
                                 )
                             ),
@@ -515,12 +711,14 @@ const App = () => {
                     selectedUser 
                         ? React.createElement('div', null,
                             React.createElement('div', { className: 'chat-header' },
-                                React.createElement('span', null, selectedUser.avatar, ' ', selectedUser.username),
-                                React.createElement('span', { className: onlineUsers.includes(selectedUser.id) ? 'online-dot' : 'offline-dot' },
+                                React.createElement('span', null, selectedUser.avatar || '👤', ' ', selectedUser.username),
+                                React.createElement('span', { 
+                                    className: onlineUsers.includes(selectedUser.id) ? 'online-dot' : 'offline-dot' 
+                                },
                                     onlineUsers.includes(selectedUser.id) ? '🟢 Онлайн' : '⚪ Офлайн'
                                 )
                             ),
-                            React.createElement('div', { className: 'chat-messages' },
+                            React.createElement('div', { className: 'chat-messages', id: 'chatMessages' },
                                 messages.length === 0 
                                     ? React.createElement('div', { className: 'empty-chat' }, 'Начните общение!')
                                     : messages.map((msg, i) => 
@@ -530,15 +728,15 @@ const App = () => {
                                         },
                                             msg.content,
                                             React.createElement('div', { className: 'msg-time' },
-                                                new Date(msg.created_at).toLocaleTimeString()
+                                                new Date(msg.created_at).toLocaleTimeString('ru-RU')
                                             )
                                         )
                                     )
                             ),
                             React.createElement('div', { className: 'chat-input' },
                                 React.createElement('input', {
+                                    ref: chatInputRef,
                                     placeholder: 'Сообщение...',
-                                    id: 'chatInput',
                                     onKeyDown: (e) => {
                                         if (e.key === 'Enter') {
                                             sendMessage(e.target.value);
@@ -546,11 +744,15 @@ const App = () => {
                                         }
                                     }
                                 }),
-                                React.createElement('button', { onClick: () => {
-                                    const input = document.getElementById('chatInput');
-                                    sendMessage(input.value);
-                                    input.value = '';
-                                }}, '➤')
+                                React.createElement('button', { 
+                                    onClick: () => {
+                                        const input = chatInputRef.current;
+                                        if (input) {
+                                            sendMessage(input.value);
+                                            input.value = '';
+                                        }
+                                    }
+                                }, '➤')
                             )
                         )
                         : React.createElement('div', { className: 'empty-chat' }, 'Выберите друга для чата')
