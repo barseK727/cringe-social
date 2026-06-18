@@ -1,5 +1,5 @@
 // ============================================================
-// ПОЛНОСТЬЮ ПЕРЕПИСАННЫЙ ФРОНТЕНД
+// КРИНЖОСЕТЬ — ПОЛНОСТЬЮ РАБОЧИЙ ФРОНТЕНД
 // ============================================================
 
 const { useState, useEffect, useCallback, useRef, useMemo } = React;
@@ -46,7 +46,6 @@ const Auth = ({ onLogin }) => {
             });
 
             if (data.success) {
-                // Сохраняем токен в localStorage
                 localStorage.setItem('session_token', data.token);
                 localStorage.setItem('user_data', JSON.stringify(data.user));
                 onLogin(data.user, data.token);
@@ -60,6 +59,7 @@ const Auth = ({ onLogin }) => {
 
     return React.createElement('div', { className: 'auth-container' },
         React.createElement('h1', null, isLogin ? 'Вход' : 'Регистрация'),
+        React.createElement('p', { className: 'subtitle' }, isLogin ? 'Добро пожаловать в КРИНЖОСЕТЬ' : 'Присоединяйся к КРИНЖОСЕТИ'),
         React.createElement('form', { onSubmit: handleSubmit },
             !isLogin && React.createElement('input', {
                 type: 'text',
@@ -163,7 +163,6 @@ const Post = ({ post, currentUserId, onLike, onDelete, onComment }) => {
         }
     };
 
-    // Подписываемся на новые комментарии через WebSocket
     useEffect(() => {
         if (!window.socket) return;
 
@@ -179,7 +178,6 @@ const Post = ({ post, currentUserId, onLike, onDelete, onComment }) => {
         };
     }, [post.id]);
 
-    // Подписываемся на обновление лайков
     useEffect(() => {
         if (!window.socket) return;
 
@@ -453,7 +451,6 @@ const App = () => {
             });
             if (data.success) {
                 setNewPostContent('');
-                // Пост добавится через WebSocket
             }
         } catch (err) {
             setError('Ошибка создания поста');
@@ -552,6 +549,11 @@ const App = () => {
         React.createElement('div', { className: 'main-layout' },
             // --- САЙДБАР ---
             React.createElement('div', { className: 'sidebar' },
+                // ЛОГОТИП КРИНЖОСЕТЬ
+                React.createElement('div', { className: 'logo' },
+                    'КРИНЖОСЕТЬ',
+                    React.createElement('span', null, '⚡ Всё по-настоящему')
+                ),
                 React.createElement('div', { className: 'user-card' },
                     React.createElement('div', { className: 'avatar-large' }, user.avatar || '👤'),
                     React.createElement('div', { className: 'username' }, user.username),
@@ -581,24 +583,31 @@ const App = () => {
                 // Лента
                 activeTab === 'feed' && React.createElement('div', { className: 'feed' },
                     React.createElement('div', { className: 'create-post' },
+                        React.createElement('div', { className: 'post-label' }, '📝 Что у тебя нового?'),
                         React.createElement('textarea', {
-                            placeholder: 'Что у тебя нового?',
+                            placeholder: 'Поделись мыслями...',
                             value: newPostContent,
                             onChange: (e) => setNewPostContent(e.target.value),
                             rows: 3,
                             disabled: loading
                         }),
-                        React.createElement('button', { 
-                            onClick: createPost,
-                            disabled: loading || !newPostContent.trim()
-                        }, '📝 Опубликовать')
+                        React.createElement('div', { className: 'post-actions-row' },
+                            React.createElement('button', { 
+                                onClick: createPost,
+                                disabled: loading || !newPostContent.trim()
+                            }, '📝 Опубликовать')
+                        )
                     ),
                     error && React.createElement('div', { className: 'error-message' }, error),
-                    loading && React.createElement('div', { className: 'loading' }, 'Загрузка...'),
+                    loading && React.createElement('div', { className: 'loading' },
+                        React.createElement('div', { className: 'spinner' })
+                    ),
                     posts.length === 0 && !loading 
-                        ? React.createElement('div', { className: 'empty-state' }, 
-                            'Нет постов. Добавь друзей, чтобы видеть их посты!'
-                        )
+                        ? React.createElement('div', { className: 'empty-state' },
+                            React.createElement('div', { className: 'empty-icon' }, '📭'),
+                            React.createElement('div', { className: 'empty-title' }, 'Здесь пока пусто'),
+                            React.createElement('div', { className: 'empty-desc' }, 'Добавь друзей, чтобы видеть их посты!')
+                          )
                         : posts.map(post => 
                             React.createElement(Post, {
                                 key: post.id,
@@ -611,15 +620,20 @@ const App = () => {
                         )
                 ),
 
-                // Друзья
+                // Вкладка Друзья
                 activeTab === 'friends' && React.createElement('div', { className: 'friends-tab' },
-                    React.createElement('h2', null, '👥 Друзья'),
+                    React.createElement('div', { className: 'tab-title' }, '👥 Друзья'),
+                    React.createElement('div', { className: 'tab-subtitle' }, 'Общайся с друзьями и будь в курсе событий'),
+                    
                     friendRequests.length > 0 && React.createElement('div', { className: 'friend-requests' },
-                        React.createElement('h3', null, '📨 Заявки в друзья'),
+                        React.createElement('div', { className: 'requests-title' }, '📨 Заявки в друзья'),
                         friendRequests.map(req => 
                             React.createElement('div', { key: req.id, className: 'friend-request' },
-                                React.createElement('span', null, req.avatar || '👤', ' ', req.username),
-                                React.createElement('div', null,
+                                React.createElement('div', { className: 'request-user' },
+                                    React.createElement('div', { className: 'request-avatar' }, req.avatar || '👤'),
+                                    React.createElement('span', { className: 'request-name' }, req.username)
+                                ),
+                                React.createElement('div', { className: 'request-actions' },
                                     React.createElement('button', { 
                                         className: 'accept-btn',
                                         onClick: () => acceptFriendRequest(req.id)
@@ -632,31 +646,44 @@ const App = () => {
                             )
                         )
                     ),
-                    friends.length === 0 
-                        ? React.createElement('div', { className: 'empty-state' }, 'У вас пока нет друзей')
-                        : friends.map(friend => 
-                            React.createElement('div', { key: friend.id, className: 'friend-item' },
-                                React.createElement('span', null, friend.avatar || '👤', ' ', friend.username),
-                                React.createElement('span', { 
-                                    className: onlineUsers.includes(friend.id) ? 'online-dot' : 'offline-dot' 
-                                },
-                                    onlineUsers.includes(friend.id) ? '🟢 Онлайн' : '⚪ Офлайн'
-                                ),
-                                React.createElement('button', { 
-                                    className: 'chat-btn',
-                                    onClick: () => {
-                                        setSelectedChat(friend.id);
-                                        loadMessages(friend.id);
-                                        setActiveTab('feed');
-                                    }
-                                }, '💬 Написать')
+                    
+                    React.createElement('div', { className: 'friends-list' },
+                        friends.length === 0 
+                            ? React.createElement('div', { className: 'empty-state' },
+                                React.createElement('div', { className: 'empty-icon' }, '👻'),
+                                React.createElement('div', { className: 'empty-title' }, 'Пока никого нет'),
+                                React.createElement('div', { className: 'empty-desc' }, 'Найди друзей через поиск и добавь их!')
+                              )
+                            : friends.map(friend => 
+                                React.createElement('div', { key: friend.id, className: 'friend-item' },
+                                    React.createElement('div', { className: 'friend-avatar' }, friend.avatar || '👤'),
+                                    React.createElement('div', { className: 'friend-info' },
+                                        React.createElement('div', { className: 'friend-name' }, friend.username),
+                                        React.createElement('span', { 
+                                            className: `friend-status ${onlineUsers.includes(friend.id) ? 'online' : 'offline'}`
+                                        },
+                                            onlineUsers.includes(friend.id) ? '🟢 Онлайн' : '⚪ Офлайн'
+                                        )
+                                    ),
+                                    React.createElement('div', { className: 'friend-actions' },
+                                        React.createElement('button', { 
+                                            className: 'write-btn',
+                                            onClick: () => {
+                                                setSelectedChat(friend.id);
+                                                loadMessages(friend.id);
+                                                setActiveTab('feed');
+                                            }
+                                        }, '✉️ Написать')
+                                    )
+                                )
                             )
-                        )
+                    )
                 ),
 
                 // Поиск
                 activeTab === 'search' && React.createElement('div', { className: 'search-tab' },
-                    React.createElement('h2', null, '🔍 Поиск пользователей'),
+                    React.createElement('div', { className: 'tab-title' }, '🔍 Поиск'),
+                    React.createElement('div', { className: 'tab-subtitle' }, 'Найди друзей и добавь их'),
                     React.createElement('input', {
                         type: 'text',
                         className: 'search-input',
@@ -676,7 +703,7 @@ const App = () => {
                                     React.createElement('div', { className: 'search-email' }, u.email)
                                 ),
                                 React.createElement('span', { 
-                                    className: onlineUsers.includes(u.id) ? 'online-dot' : 'offline-dot' 
+                                    className: `search-status ${onlineUsers.includes(u.id) ? 'online' : 'offline'}`
                                 },
                                     onlineUsers.includes(u.id) ? '🟢 Онлайн' : '⚪ Офлайн'
                                 )
@@ -689,15 +716,15 @@ const App = () => {
                                     : React.createElement('button', { 
                                         className: 'add-friend-btn',
                                         onClick: () => sendFriendRequest(u.id)
-                                    }, '➕ Добавить в друзья'),
+                                    }, '➕ Добавить'),
                                 React.createElement('button', { 
-                                    className: 'chat-btn',
+                                    className: 'chat-btn-small',
                                     onClick: () => {
                                         setSelectedChat(u.id);
                                         loadMessages(u.id);
                                         setActiveTab('feed');
                                     }
-                                }, '💬 Написать')
+                                }, '💬')
                             )
                         );
                     })
@@ -707,20 +734,29 @@ const App = () => {
             // --- ПРАВАЯ ПАНЕЛЬ (ЧАТ) ---
             React.createElement('div', { className: 'right-sidebar' },
                 React.createElement('div', { className: 'chat-box' },
-                    React.createElement('h3', null, '💬 Сообщения'),
+                    React.createElement('div', { className: 'chat-title' },
+                        React.createElement('span', { className: 'chat-icon' }, '💬'),
+                        'Сообщения'
+                    ),
                     selectedUser 
                         ? React.createElement('div', null,
                             React.createElement('div', { className: 'chat-header' },
-                                React.createElement('span', null, selectedUser.avatar || '👤', ' ', selectedUser.username),
+                                React.createElement('div', { className: 'chat-partner' },
+                                    React.createElement('span', { className: 'partner-avatar' }, selectedUser.avatar || '👤'),
+                                    selectedUser.username
+                                ),
                                 React.createElement('span', { 
-                                    className: onlineUsers.includes(selectedUser.id) ? 'online-dot' : 'offline-dot' 
+                                    className: `chat-status ${onlineUsers.includes(selectedUser.id) ? 'online' : 'offline'}`
                                 },
                                     onlineUsers.includes(selectedUser.id) ? '🟢 Онлайн' : '⚪ Офлайн'
                                 )
                             ),
                             React.createElement('div', { className: 'chat-messages', id: 'chatMessages' },
                                 messages.length === 0 
-                                    ? React.createElement('div', { className: 'empty-chat' }, 'Начните общение!')
+                                    ? React.createElement('div', { className: 'empty-chat' },
+                                        React.createElement('div', { className: 'empty-icon' }, '💭'),
+                                        React.createElement('div', { className: 'empty-text' }, 'Начните общение!')
+                                      )
                                     : messages.map((msg, i) => 
                                         React.createElement('div', {
                                             key: i,
@@ -755,7 +791,10 @@ const App = () => {
                                 }, '➤')
                             )
                         )
-                        : React.createElement('div', { className: 'empty-chat' }, 'Выберите друга для чата')
+                        : React.createElement('div', { className: 'empty-chat' },
+                            React.createElement('div', { className: 'empty-icon' }, '👥'),
+                            React.createElement('div', { className: 'empty-text' }, 'Выберите друга для чата')
+                        )
                 )
             )
         )
